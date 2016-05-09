@@ -20,11 +20,19 @@
 #include <openvswitch/vlog.h>
 #include <openvswitch/compiler.h>
 
+#define MAX_VRF_ID 1023
+#define DEFAULT_VRF_ID 0
+#define MIN_VRF_ID 1
 
 extern void vrfmgrd_ovsdb_init(const char *db_path);
 extern void vrfmgrd_ovsdb_exit(void);
 extern void vrfmgrd_run(void);
 extern void vrfmgrd_wait(void);
+bool allocate_vrf_id(struct ovsrec_vrf *vrf, uint32_t vrf_id);
+bool free_vrf_allocated_id(uint32_t vrf_id);
+void initialize_free_vrf_id_list(void);
+void set_vrf_id(int64_t vrf_id);
+int32_t allocate_first_vrf_id(struct ovsrec_vrf *vrf);
 
 /*
  * key : "namespace_ready" is used in status column of VRF table
