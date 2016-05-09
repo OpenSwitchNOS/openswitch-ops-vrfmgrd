@@ -17,6 +17,7 @@
 
 import pytest
 import re
+import collections
 from opstestfw import *
 from opstestfw.switch.CLI import *
 from opstestfw.switch import *
@@ -41,6 +42,41 @@ topoDict = {"topoExecution": 1000,
             "topoTarget": "dut01",
             "topoDevices": "dut01",
             "topoFilters": "dut01:system-category:switch"}
+
+NO_OF_VRF_TO_CREATE = 20
+
+
+def configure_vrf(**kwargs):
+    device1 = kwargs.get('device1', None)
+    vrf_name = kwargs.get('vrf', None)
+
+    cmd = "ovs-vsctl add-vrf " + vrf_name
+    devIntRetStruct = device1.DeviceInteract(command=cmd)
+    retCode = devIntRetStruct.get('returnCode')
+    assert retCode == 0, "Failed to Configre VRF"
+    LogOutput('info', "### Configured VRF %s ###" % vrf_name)
+
+
+def get_vrf_table_id(**kwargs):
+    device1 = kwargs.get('device1', None)
+    vrf_name = kwargs.get('vrf', None)
+
+    cmd = "ovs-vsctl list vrf " + vrf_name
+    devIntRetStruct = device1.DeviceInteract(command=cmd)
+    retCode = devIntRetStruct.get('returnCode')
+    assert retCode == 0, "Failed to get the VRF table"
+
+    out = devIntRetStruct.get('buffer')
+    if "no row \"vrf3\" in table VRF" in out:
+        return
+
+    lines = out.split('\n')
+    for line in lines:
+        if "table_id" in line:
+            table_id_str, id_value = line.split(':')
+            id_value = id_value.strip()
+
+    return id_value
 
 
 def vrf_configuration(**kwargs):
@@ -125,7 +161,99 @@ def vrf_configuration(**kwargs):
     LogOutput('info', "########## Namespaces are successfully deleted"
                       " ##########")
 
-@pytest.mark.skipif(True, reason="Skipping the test case.")
+
+def vrf_table_id_configuration(**kwargs):
+    device1 = kwargs.get('device1', None)
+
+    device1.commandErrorCheck = 0
+
+    table_id_list = []
+    LogOutput('info', "########## Verifying default VRF table_id ##########")
+    devIntRetStruct = device1.DeviceInteract(command="ovs-vsctl list vrf \
+                                             vrf_default")
+    retCode = devIntRetStruct.get('returnCode')
+    assert retCode == 0, "Failed to get the default VRF table"
+
+    out = devIntRetStruct.get('buffer')
+    lines = out.split('\n')
+    for line in lines:
+        if "table_id" in line:
+            table_id_str, id_value = line.split(':')
+            id_value = id_value.strip()
+            assert id_value is '0', "Failed to verify that the table_id value"\
+                                    " of default VRF is 0"
+
+    LogOutput('info', "########## Verified the default VRF table_id value is"
+                      " Zero##########")
+
+    table_id_list.append(id_value)
+
+    for x in range(1, NO_OF_VRF_TO_CREATE):
+        vrf_name = str("vrf%d" % x)
+        configure_vrf(device1=device1, vrf=vrf_name)
+        table_id = get_vrf_table_id(device1=device1, vrf=vrf_name)
+        table_id_list.append(table_id)
+
+        # Assert if any of the table_id is repeated.
+        assert [item for item, count in
+                collections.Counter(table_id_list).items() if count == 1]
+
+    LogOutput('info', "########## Verified the VRF table_id assigned are"
+                      " Unique: %s##########" % table_id_list)
+
+    # Delete a VRF and verify that a new table_id is assigned to the VRF,
+    # not the old deleted one.
+    LogOutput('info', "########## Deleting vrf3 ##########")
+    devIntRetStruct = device1.DeviceInteract(command="ovs-vsctl del-vrf vrf3")
+    retCode = devIntRetStruct.get('returnCode')
+    assert retCode == 0, "Failed to get the delete vrf3"
+
+    devIntRetStruct = device1.DeviceInteract(command="ovs-vsctl list vrf \
+                                             vrf3")
+    out = devIntRetStruct.get('buffer')
+    assert "no row \"vrf3\" in table VRF" in out, "VRF deletion Failed"
+
+    # Add a new VRF and verify that the table_id it gets is not in list.
+    configure_vrf(device1=device1, vrf="vrf3")
+    table_id = get_vrf_table_id(device1=device1, vrf="vrf3")
+    assert table_id not in table_id_list, "table_id obtained of the deleted \
+        VRF"
+    LogOutput('info', "########## Deleted and added back vrf3, new table_id"
+                      " is generated ##########")
+
+    # Compare table_id list before and after process restart.
+    # Obtain the current table_id_list
+    table_id_list_before_reboot = []
+    table_id_list_after_reboot = []
+    for x in range(1, NO_OF_VRF_TO_CREATE):
+        vrf_name = str("vrf%d" % x)
+        table_id = get_vrf_table_id(device1=device1, vrf=vrf_name)
+        table_id_list_before_reboot.append(table_id)
+
+    # Restart the vrfmgrd process
+    device1.DeviceInteract(command="systemctl stop ops-vrfmgrd")
+    device1.DeviceInteract(command="systemctl start ops-vrfmgrd")
+
+    for x in range(1, NO_OF_VRF_TO_CREATE):
+        vrf_name = str("vrf%d" % x)
+        table_id = get_vrf_table_id(device1=device1, vrf=vrf_name)
+        table_id_list_after_reboot.append(table_id)
+
+    for x in range(0, len(table_id_list_before_reboot)):
+        assert \
+            table_id_list_before_reboot[x] == table_id_list_after_reboot[x],\
+            "Table_id after obtained after process restart is not same as \
+            before"
+    LogOutput('info', "########## VRF table_id assigned before the"
+                      " restart process: %s##########"
+                      % table_id_list_before_reboot)
+    LogOutput('info', "########## VRF table_id assigned after the "
+                      " restart process: %s##########"
+                      % table_id_list_after_reboot)
+    LogOutput('info', "########## Verified the table_id List before and after"
+                      " restart of vrfmgrd process ##########")
+
+
 @pytest.mark.timeout(1000)
 class Test_vrf_configuration:
     def setup_class(cls):
@@ -141,3 +269,7 @@ class Test_vrf_configuration:
     def test_vrf_configuration(self):
         dut01Obj = self.topoObj.deviceObjGet(device="dut01")
         retValue = vrf_configuration(device1=dut01Obj)
+
+    def test_vrf_table_id_configuration(self):
+        dut01Obj = self.topoObj.deviceObjGet(device="dut01")
+        retValue = vrf_table_id_configuration(device1=dut01Obj)

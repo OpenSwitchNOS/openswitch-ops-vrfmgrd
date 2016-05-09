@@ -83,6 +83,7 @@ struct vrf_info {
     char              *name;    /*VRF name*/
     size_t            n_ports;  /*number of ports associated with VRF*/
     struct port_name  **ports;  /*to store port names belongs to VRF*/
+    uint32_t          vrf_id;
 };
 
 static struct ovsdb_idl *idl;
@@ -117,6 +118,8 @@ vrfmgrd_ovsdb_init(const char *db_path)
     ovsdb_idl_add_table(idl, &ovsrec_table_vrf);
     ovsdb_idl_add_column(idl, &ovsrec_vrf_col_name);
     ovsdb_idl_add_column(idl, &ovsrec_vrf_col_ports);
+    ovsdb_idl_add_column(idl, &ovsrec_vrf_col_table_id);
+    ovsdb_idl_omit_alert(idl, &ovsrec_vrf_col_table_id);
     ovsdb_idl_add_column(idl, &ovsrec_vrf_col_status);
     ovsdb_idl_omit_alert(idl, &ovsrec_vrf_col_status);
 
@@ -124,6 +127,7 @@ vrfmgrd_ovsdb_init(const char *db_path)
     ovsdb_idl_add_table(idl, &ovsrec_table_port);
     ovsdb_idl_add_column(idl, &ovsrec_port_col_name);
 
+    initialize_free_vrf_id_list();
 } /* vrfmgrd_ovsdb_init */
 
 void
@@ -157,10 +161,35 @@ vrf_create_namespace(struct ovsrec_vrf *vrf)
 {
     struct vrf_info *new_vrf = NULL;
     char run_exec[MAX_ARRAY_SIZE] = {0}, buff[UUID_LEN] = {0};
-    int i;
+    int i, vrf_id;
     FILE *fp;
+    bool reboot_config = false;
+
+    /* No need to create a namespace for vrf_default */
+    if (!strncmp(vrf->name, DEFAULT_VRF_NAME, strlen(DEFAULT_VRF_NAME))) {
+        VLOG_DBG("%s: no namespace need to be created\n", vrf->name);
+        return 0;
+    }
 
     new_vrf = xzalloc(sizeof(struct vrf_info));
+    reboot_config = ((vrf->table_id == NULL) ? false: true);
+    if(reboot_config)
+    {
+        set_vrf_id(*vrf->table_id);
+    }
+    else
+    {
+        vrf_id = allocate_first_vrf_id(vrf);
+        if (vrf_id < 0)
+        {
+            VLOG_DBG("%s: no table_id available, VRF creation failed.\n", vrf->name);
+            free(new_vrf);
+            new_vrf = NULL;
+            return -1;
+        }
+    }
+    new_vrf->vrf_id = (uint32_t) *vrf->table_id;
+
     new_vrf->vrf_uuid = xzalloc(sizeof(struct uuid));
     sprintf(buff, UUID_FMT, UUID_ARGS(&(vrf->header_.uuid)));
 
@@ -179,15 +208,13 @@ vrf_create_namespace(struct ovsrec_vrf *vrf)
             strncpy(new_vrf->ports[i]->name, vrf->ports[i]->name, strlen(vrf->ports[i]->name));
         }
     }
-    shash_add(&all_vrfs, (const char *)buff, new_vrf);
 
-    /* No need to create a namespace for vrf_default */
-    if (!strncmp(vrf->name, DEFAULT_VRF_NAME, strlen(DEFAULT_VRF_NAME))) {
-        VLOG_DBG("%s: no namespace need to be created\n", vrf->name);
-        return 0;
+    shash_add(&all_vrfs, (const char *)buff, new_vrf);
+    if(!reboot_config)
+    {
+        create_namespace(buff);
     }
 
-    create_namespace(buff);
     /* In the current desgin zebra is run by vrfmgrd daemon
      * later zebra will be run by systemd
      */
@@ -198,6 +225,7 @@ vrf_create_namespace(struct ovsrec_vrf *vrf)
         return -1;
     }
     pclose(fp);
+
     return 0;
 }
 
@@ -230,6 +258,10 @@ vrf_delete_namespace(struct shash_node *sh_node)
     free(del_vrf->ports);
     free(del_vrf->name);
     free(del_vrf->vrf_uuid);
+    if (!free_vrf_allocated_id(del_vrf->vrf_id)){
+        VLOG_ERR("Failed to free the VRF assigned ID");
+        return -1;
+    }
     free(del_vrf);
     del_vrf->ports = NULL;
     del_vrf->name = NULL;
