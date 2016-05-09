@@ -33,7 +33,7 @@ include_directories (${PROJECT_BINARY_DIR} ${PROJECT_SOURCE_DIR}/${INCL_DIR}
 set (CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wall -Werror")
 
 # Source files to build ops-vrfmgrd
-set (SOURCES ${SRC_DIR}/vrfmgrd.c ${SRC_DIR}/vrfmgrd_ovsdb_if.c)
+set (SOURCES ${SRC_DIR}/vrfmgrd.c ${SRC_DIR}/vrfmgrd_ovsdb_if.c ${SRC_DIR}/vrfmgrd_tableid_if.c)
 
 # Rules to build ops-vrfmgrd
 add_executable (${VRFMGRD} ${SOURCES})
