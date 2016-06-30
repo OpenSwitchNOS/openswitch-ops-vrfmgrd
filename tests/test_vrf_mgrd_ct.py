@@ -75,7 +75,6 @@ def get_vrf_table_id(**kwargs):
         if "table_id" in line:
             table_id_str, id_value = line.split(':')
             id_value = id_value.strip()
-
     return id_value
 
 
@@ -159,6 +158,62 @@ def vrf_configuration(**kwargs):
     LogOutput('info', "### Deleted namespace " + blue_vrf + " ###")
     LogOutput('info', "### Deleted namespace " + green_vrf + " ###")
     LogOutput('info', "########## Namespaces are successfully deleted"
+                      " ##########")
+
+
+def vrf_loopback_configuration(**kwargs):
+    device1 = kwargs.get('device1', None)
+
+    device1.commandErrorCheck = 0
+
+    green_vrf = None
+    LogOutput('info', "########## Configure VRF on the switch ##########")
+    # Configure green VRF
+    devIntRetStruct = device1.DeviceInteract(command="ovs-vsctl add-vrf green")
+    retCode = devIntRetStruct.get('returnCode')
+    assert retCode == 0, "Failed to Configre VRF"
+    LogOutput('info', "### Configured VRF green ###")
+
+    buff = device1.DeviceInteract(command="ip netns")
+    out = buff.get('buffer')
+    lines = out.split('\n')
+    for line in lines:
+       if "nonet" not in line and "swns" not in line and "netns" not in line:
+            green_vrf = line.strip()
+            LogOutput('info', "### Created namespace "+green_vrf+" ###")
+            break
+
+    if green_vrf is None:
+        assert 0, "Failed to create green namespace"
+
+    # Verify the loopback status Up and IP address in namespace created.
+    devIntRetStruct = device1.DeviceInteract(command="ip netns exec "+green_vrf+" ifconfig -a lo")
+    retCode = devIntRetStruct.get('returnCode')
+    assert retCode == 0, "Failed to get the ifconfig info of lo in namespace"
+
+    out = devIntRetStruct.get('buffer')
+    assert 'inet addr:127.0.0.1' in out, "IP address configuration for loopback failed"
+    assert 'UP' in out, "Failed to get the loopback interface UP in new namespace"
+
+    # Un-Configure green VRF
+    devIntRetStruct = device1.DeviceInteract(command="ovs-vsctl del-vrf green")
+    retCode = devIntRetStruct.get('returnCode')
+    assert retCode == 0, "Failed to remove green VRF"
+    LogOutput('info', "### Unconfigured green VRF ###")
+
+    vrf_deletion_success = True
+
+    buff = device1.DeviceInteract(command="ip netns")
+    out = buff.get('buffer')
+    lines = out.split('\n')
+    for line in lines:
+        if green_vrf in line:
+            vrf_deletion_success = False
+
+    assert vrf_deletion_success is True, "Failed to delete the namespaces " \
+                                         "for the VRF's we de-configured"
+    LogOutput('info', "### Deleted namespace " + green_vrf + " ###")
+    LogOutput('info', "########## Namespace successfully deleted"
                       " ##########")
 
 
@@ -269,6 +324,10 @@ class Test_vrf_configuration:
     def test_vrf_configuration(self):
         dut01Obj = self.topoObj.deviceObjGet(device="dut01")
         retValue = vrf_configuration(device1=dut01Obj)
+
+    def test_vrf_loopback_configuration(self):
+        dut01Obj = self.topoObj.deviceObjGet(device="dut01")
+        retValue = vrf_loopback_configuration(device1=dut01Obj)
 
     def test_vrf_table_id_configuration(self):
         dut01Obj = self.topoObj.deviceObjGet(device="dut01")
