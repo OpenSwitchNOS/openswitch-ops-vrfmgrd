@@ -44,7 +44,7 @@ struct free_vrf_id_
 {
    uint32_t id;
    bool     id_available;
-}free_vrf_id[MAX_VRF_ID + 1];
+}free_vrf_id[MAX_VRF_ID];
 uint32_t used_vrf_id_num = MIN_VRF_ID;
 
 /*
@@ -56,7 +56,7 @@ void initialize_free_vrf_id_list()
     free_vrf_id[DEFAULT_VRF_ID].id = DEFAULT_VRF_ID;
     free_vrf_id[DEFAULT_VRF_ID].id_available = false;
 
-    for(vrf_id = MIN_VRF_ID; vrf_id <= MAX_VRF_ID; vrf_id++)
+    for(vrf_id = MIN_VRF_ID; vrf_id < MAX_VRF_ID; vrf_id++)
     {
         free_vrf_id[vrf_id].id = vrf_id;
         free_vrf_id[vrf_id].id_available = true;
@@ -76,7 +76,7 @@ void initialize_free_vrf_id_list()
 static int64_t get_available_id()
 {
     int64_t vrf_id = 0;
-    for(vrf_id = used_vrf_id_num; vrf_id <= MAX_VRF_ID; vrf_id++)
+    for(vrf_id = used_vrf_id_num; vrf_id < MAX_VRF_ID; vrf_id++)
     {
         if(free_vrf_id[vrf_id].id_available)
         {
@@ -131,7 +131,7 @@ bool allocate_vrf_id(struct ovsrec_vrf *vrf, uint32_t vrf_id)
 {
     const int64_t table_id = vrf_id;
 
-    if(vrf_id > MAX_VRF_ID)
+    if(vrf_id >= MAX_VRF_ID)
     {
         VLOG_ERR("Requested a VRF table_id '%d' greater then Max allowed "
                  "value for VRF '%s'", vrf_id, vrf->name);
@@ -153,7 +153,7 @@ bool allocate_vrf_id(struct ovsrec_vrf *vrf, uint32_t vrf_id)
  */
 bool free_vrf_allocated_id(uint32_t vrf_id)
 {
-    if(vrf_id > MAX_VRF_ID)
+    if(vrf_id >= MAX_VRF_ID)
     {
         VLOG_ERR("Recieved to free a VRF table_id '%d' greater then Max "
                  "allowed value", vrf_id);
