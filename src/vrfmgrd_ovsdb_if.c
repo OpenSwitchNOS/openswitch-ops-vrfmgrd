@@ -81,6 +81,7 @@ struct vrf_info {
     struct uuid       *vrf_uuid; /*vrf_uuid is pointing to uuid sttucture
                                    refer to uuid.h for further info*/
     char              *name;    /*VRF name*/
+    char              *ns_name; /*VRF ns name, remember for delete*/
     size_t            n_ports;  /*number of ports associated with VRF*/
     struct port_name  **ports;  /*to store port names belongs to VRF*/
     uint32_t          vrf_id;
@@ -91,6 +92,9 @@ static unsigned int idl_seqno;
 
 static bool system_configured = false;
 static bool commit_txn = false;
+static int
+reconfigure_ports(struct vrf_info *modify_vrf_ports,
+                  const struct ovsrec_vrf *vrf_row);
 
 /* Create a connection to the OVSDB at db_path and create a DB cache
  * for this daemon. */
@@ -143,12 +147,24 @@ vrfmgrd_ovsdb_exit(void)
 static void
 create_namespace(const char *ns_name)
 {
-    char ns_path[MAX_ARRAY_SIZE];
+    char ns_path[MAX_ARRAY_SIZE] = {0};
+    char if_path[MAX_ARRAY_SIZE] = {0};
+    FILE *fp;
 
     snprintf(ns_path, MAX_ARRAY_SIZE, "%s/%s", "/var/run/netns", ns_name);
     close(open(ns_path, O_RDONLY|O_CREAT|O_EXCL, 0));
     unshare(CLONE_NEWNET);
     mount("/proc/self/ns/net", ns_path, "none", MS_BIND , NULL);
+
+    /* Bring up default loopback for self ping to work */
+    snprintf(if_path, MAX_ARRAY_SIZE, "/sbin/ip nets exec %s ifconfig lo up", ns_name);
+    fp = popen(if_path, "r");
+    if (fp == NULL) {
+        VLOG_ERR("Command failed with popen");
+        return;
+    }
+    pclose(fp);
+
     return;
 }
 
@@ -160,8 +176,8 @@ static int
 vrf_create_namespace(struct ovsrec_vrf *vrf)
 {
     struct vrf_info *new_vrf = NULL;
-    char run_exec[MAX_ARRAY_SIZE] = {0}, buff[UUID_LEN] = {0};
-    int i, vrf_id;
+    char run_exec[MAX_ARRAY_SIZE] = {0}, buff[UUID_LEN+1] = {0};
+    int vrf_id;
     FILE *fp;
     bool config_restart = false;
 
@@ -192,25 +208,20 @@ vrf_create_namespace(struct ovsrec_vrf *vrf)
     new_vrf->vrf_uuid->parts[2] = vrf->header_.uuid.parts[2];
     new_vrf->vrf_uuid->parts[3] = vrf->header_.uuid.parts[3];
     new_vrf->name = xstrdup(vrf->name);
-    new_vrf->n_ports = vrf->n_ports;
-    if (vrf->n_ports == 0 ) {
-        new_vrf->ports = NULL;
-    }
-    else {
-        new_vrf->ports = calloc(vrf->n_ports , sizeof(struct port_name *));
-        for (i = 0; i < vrf->n_ports ; i++) {
-            strncpy(new_vrf->ports[i]->name, vrf->ports[i]->name, strlen(vrf->ports[i]->name));
-        }
-    }
+    new_vrf->ports = NULL;
+    new_vrf->n_ports = 0;
+    reconfigure_ports(new_vrf, vrf); //populate vrf structure
 
     shash_add(&all_vrfs, (const char *)buff, new_vrf);
 
     /* No need to create a namespace for vrf_default */
-    if (!strncmp(vrf->name, DEFAULT_VRF_NAME, strlen(DEFAULT_VRF_NAME))) {
+    if (!strncmp(vrf->name, DEFAULT_VRF_NAME, strlen(DEFAULT_VRF_NAME)+1)) {
         VLOG_DBG("%s: no namespace need to be created\n", vrf->name);
         return 0;
     }
 
+    get_vrf_ns_from_table_id(idl, new_vrf->vrf_id, &buff[0]);
+    new_vrf->ns_name = xstrdup(buff);
     if(!config_restart)
     {
         create_namespace(buff);
@@ -237,16 +248,23 @@ static int
 vrf_delete_namespace(struct shash_node *sh_node)
 {
     struct vrf_info *del_vrf = NULL;
-    char buff[UUID_LEN]={0};
     size_t i;
     char ns_path[MAX_ARRAY_SIZE] = {0};
 
     del_vrf = sh_node->data;
-    sprintf(buff, UUID_FMT, UUID_ARGS(del_vrf->vrf_uuid));
-    snprintf(ns_path, MAX_ARRAY_SIZE, "%s/%s", "/var/run/netns", buff);
 
-    umount2(ns_path, MNT_FORCE);
+    /*
+     * get_vrf_ns_from_table_id won't work in delete path
+     * as db would have removed that record. Hence use
+     * the stored name
+     */
+    snprintf(ns_path, MAX_ARRAY_SIZE, "%s/%s",
+               "/var/run/netns", del_vrf->ns_name);
+
+    umount2(ns_path, MNT_DETACH);
+    VLOG_ERR("umount error %s/%d", strerror(errno), errno);
     unlink(ns_path);
+    VLOG_ERR("unlink error %s/%d", strerror(errno), errno);
 
     for(i = 0 ; i < del_vrf->n_ports ; i++) {
         free(del_vrf->ports[i]->name);
@@ -257,6 +275,7 @@ vrf_delete_namespace(struct shash_node *sh_node)
 
     free(del_vrf->ports);
     free(del_vrf->name);
+    free(del_vrf->ns_name);
     free(del_vrf->vrf_uuid);
     if (!free_vrf_allocated_id(del_vrf->vrf_id)){
         VLOG_ERR("Failed to free the VRF assigned ID");
@@ -265,6 +284,7 @@ vrf_delete_namespace(struct shash_node *sh_node)
     free(del_vrf);
     del_vrf->ports = NULL;
     del_vrf->name = NULL;
+    del_vrf->ns_name = NULL;
     del_vrf->vrf_uuid = NULL;
     del_vrf = NULL;
     VLOG_INFO("Deleted a namespace :%s\n", sh_node->name);
@@ -293,33 +313,20 @@ update_vrf_ready(struct ovsrec_vrf *vrf)
  * deleted VRF.
  */
 static int
-move_intf_to_default_ns(struct vrf_info *move_intf)
+move_intf_to_default_ns(struct vrf_info *move_vrf_intf)
 {
-    char temp_string[MAX_ARRAY_SIZE] = {0} ,buff[UUID_LEN]={0};
     size_t i;
-    FILE *fp;
 
-    strncat(temp_string, NAMESPACE_EXEC, strlen(NAMESPACE_EXEC));
-    strcat(temp_string, SPACE);
-    sprintf(buff, UUID_FMT, UUID_ARGS(move_intf->vrf_uuid));
-    strncat(temp_string, buff, UUID_LEN);
-    strcat(temp_string, SPACE);
-    strncat(temp_string, SET_INTERFACE, strlen(SET_INTERFACE));
-    for (i = 0; i < move_intf->n_ports; i++) {
-        char exec_ns[MAX_ARRAY_SIZE] = {0};
-        strncpy(exec_ns, temp_string, strlen(temp_string));
-        strcat(exec_ns, SPACE);
-        strncat(exec_ns, move_intf->ports[i]->name, strlen(move_intf->ports[i]->name));
-        strcat(exec_ns, SPACE);
-        strncat(exec_ns, NETWORK_NAMESPACE, strlen(NETWORK_NAMESPACE));
-        strcat(exec_ns, SPACE);
-        strncat(exec_ns, SWNS_NAMESPACE, strlen(SWNS_NAMESPACE));
-        fp = popen(exec_ns, "r");
-        if (fp == NULL) {
-            VLOG_ERR("Command failed with popen");
-            return -1;
+    for (i = 0; i < move_vrf_intf->n_ports; i++) {
+        struct setns_info setns_local_info;
+        strncpy(&setns_local_info.to_ns[0], SWITCH_NAMESPACE,  strlen(SWITCH_NAMESPACE) + 1);
+        get_vrf_ns_from_table_id(idl, move_vrf_intf->vrf_id, &setns_local_info.from_ns[0]);
+        strncpy(&setns_local_info.intf_name[0], move_vrf_intf->ports[i]->name,
+                 IFNAMSIZ);
+        if (!nl_move_intf_to_vrf(&setns_local_info)) {
+            VLOG_ERR("Failed to move interface to %s from %s",
+                      SWITCH_NAMESPACE, move_vrf_intf->name);
         }
-        pclose(fp);
     }
     return 0;
 }
@@ -405,7 +412,7 @@ int vrfmgrd_reconfigure()
             OVSREC_IDL_ANY_TABLE_ROWS_INSERTED(vrf_row, idl_seqno) ) {
         shash_init(&sh_idl_vrfs);
         OVSREC_VRF_FOR_EACH(vrf_row, idl) {
-            char buff[UUID_LEN]={0};
+            char buff[UUID_LEN+1]={0};
             sprintf(buff, UUID_FMT, UUID_ARGS(&(vrf_row->header_.uuid)));
             if (!shash_add_once(&sh_idl_vrfs, (const char *)buff, vrf_row)) {
                 VLOG_WARN("vrf %s specified twice", vrf_row->name);
@@ -424,6 +431,9 @@ int vrfmgrd_reconfigure()
                                sh_node->name);
                     update_vrf_ready(sh_node->data);
                     commit_txn = true;
+                } else {
+                    VLOG_INFO("failed to creat a namespace :%s\n",
+                               sh_node->name);
                 }
             }
         }
@@ -452,7 +462,7 @@ int vrfmgrd_reconfigure()
     else if (OVSREC_IDL_ANY_TABLE_ROWS_MODIFIED(vrf_row, idl_seqno)) {
         if ((OVSREC_IDL_IS_COLUMN_MODIFIED(ovsrec_vrf_col_ports, idl_seqno))) {
             OVSREC_VRF_FOR_EACH(vrf_row, idl) {
-                char buff[UUID_LEN]={0};
+                char buff[UUID_LEN+1]={0};
                 struct vrf_info *modify_vrf_ports = NULL;
                 sprintf(buff, UUID_FMT, UUID_ARGS(&(vrf_row->header_.uuid)));
                 modify_vrf_ports = shash_find_data(&all_vrfs,(const char*)buff);
