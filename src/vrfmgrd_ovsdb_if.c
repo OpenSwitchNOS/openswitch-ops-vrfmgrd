@@ -58,6 +58,7 @@
 #include <hash.h>
 #include <shash.h>
 #include <unistd.h>
+
 #include "vrfmgrd.h"
 #include "smap.h"
 #include "uuid.h"
@@ -88,7 +89,6 @@ struct vrf_info {
 
 static struct ovsdb_idl *idl;
 static unsigned int idl_seqno;
-
 static bool system_configured = false;
 static bool commit_txn = false;
 
@@ -364,6 +364,26 @@ reconfigure_ports(struct vrf_info *modify_vrf_ports, const struct ovsrec_vrf *vr
     }
     return 0;
 }
+void
+nl_add_loopback_ip_address(struct ovsrec_vrf *vrf)
+{
+    char cmd[512] = {0},buff[UUID_LEN] = {0};
+
+    sprintf(buff, UUID_FMT, UUID_ARGS(&(vrf->header_.uuid)));
+
+    sprintf(cmd, "ip netns exec %s ip addr add dev lo 127.0.0.1", buff);
+
+   if (system(cmd) != 0){
+           VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
+                    cmd, strerror(errno));
+       }
+    sprintf(cmd, "ip netns exec %s ip link set dev lo up", buff);
+
+   if (system(cmd) != 0){
+           VLOG_ERR("Failed to add subinterface. cmd=%s, rc=%s",
+                    cmd, strerror(errno));
+       }
+}
 
 /* Checks to see if:
  * vrf has been added/deleted.
@@ -422,6 +442,7 @@ int vrfmgrd_reconfigure()
                 if (vrf_create_namespace(sh_node->data) != -1) {
                     VLOG_INFO("Created a namespace :%s\n",
                                sh_node->name);
+                    nl_add_loopback_ip_address(sh_node->data);
                     update_vrf_ready(sh_node->data);
                     commit_txn = true;
                 }
