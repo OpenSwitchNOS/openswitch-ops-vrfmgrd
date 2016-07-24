@@ -313,14 +313,17 @@ update_vrf_ready(struct ovsrec_vrf *vrf)
  * deleted VRF.
  */
 static int
-move_intf_to_default_ns(struct vrf_info *move_vrf_intf)
+move_intf_to_default_ns(struct shash_node *sh_node)
 {
+    struct vrf_info *move_vrf_intf = NULL;
     size_t i;
+
+    move_vrf_intf = sh_node->data;
 
     for (i = 0; i < move_vrf_intf->n_ports; i++) {
         struct setns_info setns_local_info;
         strncpy(&setns_local_info.to_ns[0], SWITCH_NAMESPACE,  strlen(SWITCH_NAMESPACE) + 1);
-        get_vrf_ns_from_table_id(idl, move_vrf_intf->vrf_id, &setns_local_info.from_ns[0]);
+        snprintf(&setns_local_info.from_ns[0], MAX_ARRAY_SIZE, move_vrf_intf->ns_name);
         strncpy(&setns_local_info.intf_name[0], move_vrf_intf->ports[i]->name,
                  IFNAMSIZ);
         if (!nl_move_intf_to_vrf(&setns_local_info)) {
@@ -445,7 +448,7 @@ int vrfmgrd_reconfigure()
     else if (OVSREC_IDL_ANY_TABLE_ROWS_DELETED(vrf_row, idl_seqno)) {
         SHASH_FOR_EACH_SAFE(sh_node, sh_next, &all_vrfs) {
             if (!shash_find_data(&sh_idl_vrfs, sh_node->name)) {
-                if(move_intf_to_default_ns(sh_node->data) == -1) {
+                if(move_intf_to_default_ns(sh_node) == -1) {
                     VLOG_ERR("Cannot move interface to default namespace\n");
                 }
                 else {
