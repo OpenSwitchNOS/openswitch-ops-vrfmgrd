@@ -320,7 +320,7 @@ move_intf_to_default_ns(struct vrf_info *move_vrf_intf)
     for (i = 0; i < move_vrf_intf->n_ports; i++) {
         struct setns_info setns_local_info;
         strncpy(&setns_local_info.to_ns[0], SWITCH_NAMESPACE,  strlen(SWITCH_NAMESPACE) + 1);
-        get_vrf_ns_from_table_id(idl, move_vrf_intf->vrf_id, &setns_local_info.from_ns[0]);
+        snprintf(&setns_local_info.from_ns[0], UUID_LEN+1, move_vrf_intf->ns_name);
         strncpy(&setns_local_info.intf_name[0], move_vrf_intf->ports[i]->name,
                  IFNAMSIZ);
         if (!nl_move_intf_to_vrf(&setns_local_info)) {
